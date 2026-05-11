@@ -1,5 +1,5 @@
 pub mod fingerprint;
-pub mod glob_inputs;
+pub mod glob;
 mod hash;
 pub mod pipe;
 pub mod spawn;
@@ -16,6 +16,7 @@ use rustc_hash::FxHashMap;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use vite_path::{AbsolutePath, RelativePathBuf};
+use vite_str::Str;
 use vite_task_plan::{
     ExecutionGraph, ExecutionItemDisplay, ExecutionItemKind, LeafExecutionKind, SpawnExecution,
     cache_metadata::CacheMetadata, execution_graph::ExecutionNodeIndex,
@@ -25,12 +26,12 @@ use vite_task_plan::{
 use self::tracked_accesses::TrackedPathAccesses;
 use self::{
     fingerprint::{PathRead, PostRunFingerprint},
-    glob_inputs::compute_globbed_inputs,
+    glob::compute_globbed_inputs,
     pipe::{PipeSinks, StdOutput, pipe_stdio},
     spawn::{SpawnStdio, spawn},
 };
 use super::{
-    cache::{CacheEntryValue, ExecutionCache},
+    cache::{CacheEntryValue, ExecutionCache, archive},
     event::{
         CacheDisabledReason, CacheErrorKind, CacheNotUpdatedReason, CacheStatus, CacheUpdateStatus,
         ExecutionError,
@@ -75,6 +76,11 @@ struct ExecutionContext<'a> {
     /// Base path for resolving relative paths in cache entries.
     /// Typically the workspace root.
     cache_base_path: &'a Arc<AbsolutePath>,
+    /// Directory where cache files (db, archives) are stored.
+    cache_dir: &'a AbsolutePath,
+    /// Public-facing program name (e.g. `vp`), used in user-facing error
+    /// messages that suggest a CLI command (e.g. `cache clean`).
+    program_name: &'a str,
     /// Token cancelled when a task fails. Kills in-flight child processes
     /// (via `start_kill` in spawn.rs), prevents scheduling new tasks, and
     /// prevents caching results of concurrently-running tasks.
@@ -236,6 +242,8 @@ impl ExecutionContext<'_> {
                     spawn_execution,
                     self.cache,
                     self.cache_base_path,
+                    self.cache_dir,
+                    self.program_name,
                     self.fast_fail_token.clone(),
                     self.interrupt_token.clone(),
                 )
@@ -323,11 +331,17 @@ struct TrackingOutcome {
     clippy::too_many_lines,
     reason = "sequential cache check, execute, and update steps are clearer in one function"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "these are the unavoidable inputs for a free-function cache-aware spawn"
+)]
 pub async fn execute_spawn(
     mut leaf_reporter: Box<dyn LeafExecutionReporter>,
     spawn_execution: &SpawnExecution,
     cache: &ExecutionCache,
     cache_base_path: &Arc<AbsolutePath>,
+    cache_dir: &AbsolutePath,
+    program_name: &str,
     fast_fail_token: CancellationToken,
     interrupt_token: CancellationToken,
 ) -> SpawnOutcome {
@@ -399,6 +413,27 @@ pub async fn execute_spawn(
             };
             let _ = writer.write_all(&output.content);
             let _ = writer.flush();
+        }
+        // Restore output files from the cached archive. Failure here means the
+        // archive file is missing, truncated, or otherwise unreadable — the
+        // task can't proceed because the cache promised the outputs would be
+        // restored. Surface a recovery instruction rather than just the raw
+        // I/O error so users know to clear the cache.
+        if let Some(ref archive_name) = cached.output_archive {
+            let archive_path = cache_dir.join(archive_name.as_str());
+            if let Err(err) = archive::extract_output_archive(cache_base_path, &archive_path) {
+                let err = err.context(vite_str::format!(
+                    "failed to restore cached outputs from {}; the archive may have been deleted \
+                     or corrupted. Run `{program_name} cache clean` to clear the cache.",
+                    archive_path.as_path().display()
+                ));
+                leaf_reporter.finish(
+                    None,
+                    CacheUpdateStatus::NotUpdated(CacheNotUpdatedReason::CacheHit),
+                    Some(ExecutionError::Cache { kind: CacheErrorKind::Lookup, source: err }),
+                );
+                return SpawnOutcome::Failed;
+            }
         }
         leaf_reporter.finish(
             None,
@@ -605,13 +640,38 @@ pub async fn execute_spawn(
                 let path_reads = tracking.as_ref().map_or(&empty_path_reads, |t| &t.path_reads);
                 match PostRunFingerprint::create(path_reads, cache_base_path, &globbed_inputs) {
                     Ok(post_run_fingerprint) => {
+                        // Collect output files and create archive
+                        let output_archive =
+                            match collect_and_archive_outputs(metadata, cache_base_path, cache_dir)
+                            {
+                                Ok(archive) => archive,
+                                Err(err) => {
+                                    let result = (
+                                        CacheUpdateStatus::NotUpdated(
+                                            CacheNotUpdatedReason::CacheDisabled,
+                                        ),
+                                        Some(ExecutionError::Cache {
+                                            kind: CacheErrorKind::Update,
+                                            source: err,
+                                        }),
+                                    );
+                                    leaf_reporter.finish(
+                                        Some(outcome.exit_status),
+                                        result.0,
+                                        result.1,
+                                    );
+                                    return SpawnOutcome::Spawned(outcome.exit_status);
+                                }
+                            };
+
                         let new_cache_value = CacheEntryValue {
                             post_run_fingerprint,
                             std_outputs: std_outputs.into(),
                             duration,
                             globbed_inputs,
+                            output_archive,
                         };
-                        match cache.update(metadata, new_cache_value).await {
+                        match cache.update(metadata, new_cache_value, cache_dir).await {
                             Ok(()) => (CacheUpdateStatus::Updated, None),
                             Err(err) => (
                                 CacheUpdateStatus::NotUpdated(CacheNotUpdatedReason::CacheDisabled),
@@ -643,6 +703,40 @@ pub async fn execute_spawn(
     leaf_reporter.finish(Some(outcome.exit_status), cache_update_status, cache_error);
 
     SpawnOutcome::Spawned(outcome.exit_status)
+}
+
+/// Collect output files matching the configured globs and create a tar.zst
+/// archive in the cache directory.
+///
+/// Returns `Some(archive_filename)` if files were archived, `None` if the
+/// output config has no positive globs or no files matched.
+fn collect_and_archive_outputs(
+    cache_metadata: &CacheMetadata,
+    workspace_root: &AbsolutePath,
+    cache_dir: &AbsolutePath,
+) -> anyhow::Result<Option<Str>> {
+    let output_config = &cache_metadata.output_config;
+
+    if output_config.positive_globs.is_empty() {
+        return Ok(None);
+    }
+
+    let output_files = glob::collect_glob_paths(
+        workspace_root,
+        &output_config.positive_globs,
+        &output_config.negative_globs,
+    )?;
+
+    if output_files.is_empty() {
+        return Ok(None);
+    }
+
+    let archive_name: Str = vite_str::format!("{}.tar.zst", uuid::Uuid::new_v4());
+    let archive_path = cache_dir.join(archive_name.as_str());
+
+    archive::create_output_archive(workspace_root, &output_files, &archive_path)?;
+
+    Ok(Some(archive_name))
 }
 
 impl Session<'_> {
@@ -679,6 +773,8 @@ impl Session<'_> {
             reporter: &reporter,
             cache,
             cache_base_path: &self.workspace_path,
+            cache_dir: &self.cache_path,
+            program_name: self.program_name.as_str(),
             fast_fail_token: CancellationToken::new(),
             interrupt_token,
         };
