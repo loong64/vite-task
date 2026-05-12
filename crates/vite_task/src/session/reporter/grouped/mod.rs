@@ -7,9 +7,10 @@ use vite_path::AbsolutePath;
 use vite_task_plan::{ExecutionItemDisplay, LeafExecutionKind};
 
 use super::{
-    ColorizeExt, ExitStatus, GraphExecutionReporter, GraphExecutionReporterBuilder,
+    ColorSupport, ColorizeExt, ExitStatus, GraphExecutionReporter, GraphExecutionReporterBuilder,
     LeafExecutionReporter, PipeWriters, StdioConfig, StdioSuggestion,
-    format_command_with_cache_status, format_task_label, write_leaf_trailing_output,
+    format_command_with_cache_status, format_task_label, maybe_strip_writer,
+    write_leaf_trailing_output,
 };
 use crate::session::event::{CacheStatus, CacheUpdateStatus, ExecutionError};
 
@@ -20,11 +21,21 @@ use writer::GroupedWriter;
 pub struct GroupedReporterBuilder {
     workspace_path: Arc<AbsolutePath>,
     writer: Box<dyn Write>,
+    color_support: ColorSupport,
 }
 
 impl GroupedReporterBuilder {
-    pub fn new(workspace_path: Arc<AbsolutePath>, writer: Box<dyn Write>) -> Self {
-        Self { workspace_path, writer }
+    /// Grouped mode buffers child output and flushes it through `writer`
+    /// at finish time. The pipe writers themselves (see
+    /// `LeafExecutionReporter::start`) strip ANSI on the way into the buffer,
+    /// so by the time the buffer reaches `writer` it already matches the
+    /// terminal's colour capability. `writer` is therefore stored unwrapped.
+    pub fn new(
+        workspace_path: Arc<AbsolutePath>,
+        writer: Box<dyn Write>,
+        color_support: ColorSupport,
+    ) -> Self {
+        Self { workspace_path, writer, color_support }
     }
 }
 
@@ -33,6 +44,7 @@ impl GraphExecutionReporterBuilder for GroupedReporterBuilder {
         Box::new(GroupedGraphReporter {
             writer: Rc::new(RefCell::new(self.writer)),
             workspace_path: self.workspace_path,
+            color_support: self.color_support,
         })
     }
 }
@@ -40,6 +52,7 @@ impl GraphExecutionReporterBuilder for GroupedReporterBuilder {
 struct GroupedGraphReporter {
     writer: Rc<RefCell<Box<dyn Write>>>,
     workspace_path: Arc<AbsolutePath>,
+    color_support: ColorSupport,
 }
 
 impl GraphExecutionReporter for GroupedGraphReporter {
@@ -56,6 +69,7 @@ impl GraphExecutionReporter for GroupedGraphReporter {
             label,
             started: false,
             grouped_buffer: None,
+            color_support: self.color_support,
         })
     }
 
@@ -73,6 +87,7 @@ struct GroupedLeafReporter {
     label: vite_str::Str,
     started: bool,
     grouped_buffer: Option<Rc<RefCell<Vec<u8>>>>,
+    color_support: ColorSupport,
 }
 
 impl LeafExecutionReporter for GroupedLeafReporter {
@@ -95,8 +110,14 @@ impl LeafExecutionReporter for GroupedLeafReporter {
         StdioConfig {
             suggestion: StdioSuggestion::Piped,
             writers: PipeWriters {
-                stdout_writer: Box::new(GroupedWriter::new(Rc::clone(&buffer))),
-                stderr_writer: Box::new(GroupedWriter::new(buffer)),
+                stdout_writer: maybe_strip_writer(
+                    Box::new(GroupedWriter::new(Rc::clone(&buffer))),
+                    self.color_support.stdout,
+                ),
+                stderr_writer: maybe_strip_writer(
+                    Box::new(GroupedWriter::new(buffer)),
+                    self.color_support.stderr,
+                ),
             },
         }
     }
@@ -152,7 +173,11 @@ mod tests {
         let task = spawn_task("build");
         let item = &task.items[0];
 
-        let builder = Box::new(GroupedReporterBuilder::new(test_path(), Box::new(std::io::sink())));
+        let builder = Box::new(GroupedReporterBuilder::new(
+            test_path(),
+            Box::new(std::io::sink()),
+            ColorSupport::uniform(false),
+        ));
         let mut reporter = builder.build();
         let mut leaf = reporter.new_leaf_execution(&item.execution_item_display, leaf_kind(item));
         let stdio_config = leaf.start(CacheStatus::Disabled(CacheDisabledReason::NoCacheMetadata));

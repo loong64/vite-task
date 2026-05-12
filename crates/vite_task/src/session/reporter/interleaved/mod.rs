@@ -6,20 +6,30 @@ use vite_path::AbsolutePath;
 use vite_task_plan::{ExecutionItemDisplay, LeafExecutionKind};
 
 use super::{
-    ExitStatus, GraphExecutionReporter, GraphExecutionReporterBuilder, LeafExecutionReporter,
-    PipeWriters, StdioConfig, StdioSuggestion, format_command_with_cache_status,
-    write_leaf_trailing_output,
+    ColorSupport, ExitStatus, GraphExecutionReporter, GraphExecutionReporterBuilder,
+    LeafExecutionReporter, PipeWriters, StdioConfig, StdioSuggestion,
+    format_command_with_cache_status, maybe_strip_writer, write_leaf_trailing_output,
 };
 use crate::session::event::{CacheStatus, CacheUpdateStatus, ExecutionError};
 
 pub struct InterleavedReporterBuilder {
     workspace_path: Arc<AbsolutePath>,
     writer: Box<dyn Write>,
+    color_support: ColorSupport,
 }
 
 impl InterleavedReporterBuilder {
-    pub fn new(workspace_path: Arc<AbsolutePath>, writer: Box<dyn Write>) -> Self {
-        Self { workspace_path, writer }
+    /// The reporter's own writes (command lines, error banners) decide
+    /// colour-vs-plain at format time via `ColorizeExt`, so `writer` is
+    /// stored unwrapped. `color_support` is forwarded to the pipe writers
+    /// in `LeafExecutionReporter::start`, where ANSI emitted by child tasks is stripped
+    /// for non-terminal sinks.
+    pub fn new(
+        workspace_path: Arc<AbsolutePath>,
+        writer: Box<dyn Write>,
+        color_support: ColorSupport,
+    ) -> Self {
+        Self { workspace_path, writer, color_support }
     }
 }
 
@@ -28,6 +38,7 @@ impl GraphExecutionReporterBuilder for InterleavedReporterBuilder {
         Box::new(InterleavedGraphReporter {
             writer: Rc::new(RefCell::new(self.writer)),
             workspace_path: self.workspace_path,
+            color_support: self.color_support,
         })
     }
 }
@@ -35,6 +46,7 @@ impl GraphExecutionReporterBuilder for InterleavedReporterBuilder {
 struct InterleavedGraphReporter {
     writer: Rc<RefCell<Box<dyn Write>>>,
     workspace_path: Arc<AbsolutePath>,
+    color_support: ColorSupport,
 }
 
 impl GraphExecutionReporter for InterleavedGraphReporter {
@@ -54,6 +66,7 @@ impl GraphExecutionReporter for InterleavedGraphReporter {
             workspace_path: Arc::clone(&self.workspace_path),
             stdio_suggestion,
             started: false,
+            color_support: self.color_support,
         })
     }
 
@@ -70,6 +83,7 @@ struct InterleavedLeafReporter {
     workspace_path: Arc<AbsolutePath>,
     stdio_suggestion: StdioSuggestion,
     started: bool,
+    color_support: ColorSupport,
 }
 
 impl LeafExecutionReporter for InterleavedLeafReporter {
@@ -86,8 +100,14 @@ impl LeafExecutionReporter for InterleavedLeafReporter {
         StdioConfig {
             suggestion: self.stdio_suggestion,
             writers: PipeWriters {
-                stdout_writer: Box::new(std::io::stdout()),
-                stderr_writer: Box::new(std::io::stderr()),
+                stdout_writer: maybe_strip_writer(
+                    Box::new(std::io::stdout()),
+                    self.color_support.stdout,
+                ),
+                stderr_writer: maybe_strip_writer(
+                    Box::new(std::io::stderr()),
+                    self.color_support.stderr,
+                ),
             },
         }
     }
@@ -126,8 +146,11 @@ mod tests {
         display: &ExecutionItemDisplay,
         leaf_kind: &LeafExecutionKind,
     ) -> StdioSuggestion {
-        let builder =
-            Box::new(InterleavedReporterBuilder::new(test_path(), Box::new(std::io::sink())));
+        let builder = Box::new(InterleavedReporterBuilder::new(
+            test_path(),
+            Box::new(std::io::sink()),
+            ColorSupport::uniform(false),
+        ));
         let mut reporter = builder.build();
         let mut leaf = reporter.new_leaf_execution(display, leaf_kind);
         leaf.start(CacheStatus::Disabled(CacheDisabledReason::NoCacheMetadata)).suggestion

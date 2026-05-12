@@ -6,8 +6,9 @@ use vite_path::AbsolutePath;
 use vite_task_plan::{ExecutionItemDisplay, LeafExecutionKind};
 
 use super::{
-    ExitStatus, GraphExecutionReporter, GraphExecutionReporterBuilder, LeafExecutionReporter,
-    PipeWriters, StdioConfig, StdioSuggestion, format_command_with_cache_status, format_task_label,
+    ColorSupport, ExitStatus, GraphExecutionReporter, GraphExecutionReporterBuilder,
+    LeafExecutionReporter, PipeWriters, StdioConfig, StdioSuggestion,
+    format_command_with_cache_status, format_task_label, maybe_strip_writer,
     write_leaf_trailing_output,
 };
 use crate::session::event::{CacheStatus, CacheUpdateStatus, ExecutionError};
@@ -19,11 +20,19 @@ use writer::LabeledWriter;
 pub struct LabeledReporterBuilder {
     workspace_path: Arc<AbsolutePath>,
     writer: Box<dyn Write>,
+    color_support: ColorSupport,
 }
 
 impl LabeledReporterBuilder {
-    pub fn new(workspace_path: Arc<AbsolutePath>, writer: Box<dyn Write>) -> Self {
-        Self { workspace_path, writer }
+    /// `writer` is stored unwrapped — the reporter's own writes pick
+    /// colour-vs-plain at format time via `ColorizeExt`. Child-process
+    /// pipes are stripped per-stream inside `LeafExecutionReporter::start`.
+    pub fn new(
+        workspace_path: Arc<AbsolutePath>,
+        writer: Box<dyn Write>,
+        color_support: ColorSupport,
+    ) -> Self {
+        Self { workspace_path, writer, color_support }
     }
 }
 
@@ -32,6 +41,7 @@ impl GraphExecutionReporterBuilder for LabeledReporterBuilder {
         Box::new(LabeledGraphReporter {
             writer: Rc::new(RefCell::new(self.writer)),
             workspace_path: self.workspace_path,
+            color_support: self.color_support,
         })
     }
 }
@@ -39,6 +49,7 @@ impl GraphExecutionReporterBuilder for LabeledReporterBuilder {
 struct LabeledGraphReporter {
     writer: Rc<RefCell<Box<dyn Write>>>,
     workspace_path: Arc<AbsolutePath>,
+    color_support: ColorSupport,
 }
 
 impl GraphExecutionReporter for LabeledGraphReporter {
@@ -52,6 +63,7 @@ impl GraphExecutionReporter for LabeledGraphReporter {
             display: display.clone(),
             workspace_path: Arc::clone(&self.workspace_path),
             started: false,
+            color_support: self.color_support,
         })
     }
 
@@ -67,6 +79,7 @@ struct LabeledLeafReporter {
     display: ExecutionItemDisplay,
     workspace_path: Arc<AbsolutePath>,
     started: bool,
+    color_support: ColorSupport,
 }
 
 impl LeafExecutionReporter for LabeledLeafReporter {
@@ -88,11 +101,11 @@ impl LeafExecutionReporter for LabeledLeafReporter {
             suggestion: StdioSuggestion::Piped,
             writers: PipeWriters {
                 stdout_writer: Box::new(LabeledWriter::new(
-                    Box::new(std::io::stdout()),
+                    maybe_strip_writer(Box::new(std::io::stdout()), self.color_support.stdout),
                     prefix.as_bytes().to_vec(),
                 )),
                 stderr_writer: Box::new(LabeledWriter::new(
-                    Box::new(std::io::stderr()),
+                    maybe_strip_writer(Box::new(std::io::stderr()), self.color_support.stderr),
                     prefix.as_bytes().to_vec(),
                 )),
             },
@@ -134,7 +147,11 @@ mod tests {
         let task = spawn_task("build");
         let item = &task.items[0];
 
-        let builder = Box::new(LabeledReporterBuilder::new(test_path(), Box::new(std::io::sink())));
+        let builder = Box::new(LabeledReporterBuilder::new(
+            test_path(),
+            Box::new(std::io::sink()),
+            ColorSupport::uniform(false),
+        ));
         let mut reporter = builder.build();
         let mut leaf = reporter.new_leaf_execution(&item.execution_item_display, leaf_kind(item));
         let stdio_config = leaf.start(CacheStatus::Disabled(CacheDisabledReason::NoCacheMetadata));

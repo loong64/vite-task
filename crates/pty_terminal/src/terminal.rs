@@ -128,6 +128,53 @@ impl PtyReader {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// Returns the screen contents row-by-row with inline ANSI SGR escapes
+    /// preserved — useful for snapshot tests that need to assert colour/style.
+    ///
+    /// Rows are produced via [`vt100::Screen::rows_formatted`], which emits
+    /// only the SGR attribute escapes (no cursor positioning, no
+    /// screen-erase sequences), so the output is platform-stable. Trailing
+    /// fully-empty rows are dropped; remaining rows are joined with `\n`.
+    ///
+    /// Bare SGR-reset sequences (`\x1b[m`) are also stripped: Unix PTYs emit
+    /// them between styled spans and at the end of styled runs, but Windows
+    /// `ConPTY` consolidates the byte stream and elides those resets. Stripping
+    /// them produces identical output on all platforms while preserving the
+    /// non-reset SGR transitions that the test actually cares about.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the parser lock is poisoned.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "vt100::Screen::rows_formatted yields borrowed iterators that need the guard alive"
+    )]
+    #[must_use]
+    pub fn screen_contents_formatted(&self) -> Vec<u8> {
+        const RESET: &[u8] = b"\x1b[m";
+        let guard = self.parser.lock().unwrap();
+        let screen = guard.screen();
+        let cols = screen.size().1;
+        let rows: Vec<Vec<u8>> = screen
+            .rows_formatted(0, cols)
+            .map(|mut row| {
+                while let Some(idx) = row.windows(RESET.len()).position(|w| w == RESET) {
+                    row.drain(idx..idx + RESET.len());
+                }
+                row
+            })
+            .collect();
+        let last_non_empty = rows.iter().rposition(|r| !r.is_empty()).map_or(0, |i| i + 1);
+        let mut out = Vec::new();
+        for (i, row) in rows[..last_non_empty].iter().enumerate() {
+            if i > 0 {
+                out.push(b'\n');
+            }
+            out.extend_from_slice(row);
+        }
+        out
+    }
+
     /// Drains and returns all unhandled OSC sequences received since the last call.
     ///
     /// Each entry is a list of byte-vector parameters from a single OSC sequence

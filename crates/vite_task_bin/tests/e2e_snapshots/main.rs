@@ -46,6 +46,11 @@ struct StepConfig {
     envs: Vec<(Str, Str)>,
     #[serde(default)]
     interactions: Vec<Interaction>,
+    /// When true, render the terminal snapshot with inline ANSI escape codes
+    /// (made visible as `\e[…m`) so colour/style attributes are part of the
+    /// assertion. Default `false` keeps the plain-text behaviour.
+    #[serde(default, rename = "formatted-snapshot")]
+    formatted_snapshot: bool,
 }
 
 impl Step {
@@ -106,6 +111,13 @@ impl Step {
         match self {
             Self::Detailed(config) => &config.envs,
             Self::Simple(_) => &[],
+        }
+    }
+
+    const fn formatted_snapshot(&self) -> bool {
+        match self {
+            Self::Detailed(config) => config.formatted_snapshot,
+            Self::Simple(_) => false,
         }
     }
 }
@@ -254,6 +266,23 @@ fn resolve_env_placeholder(raw: &str) -> std::borrow::Cow<'_, OsStr> {
     }
 }
 
+/// Render the byte stream produced by `screen_contents_formatted` (which uses
+/// `vt100::Screen::rows_formatted` — see [`pty_terminal`]) into a
+/// snapshot-friendly string. Newlines (added as row separators by the PTY
+/// helper) stay literal so the snapshot remains multi-line; SGR escapes and
+/// other bytes outside printable ASCII come out as `\xNN`, `\t`, etc.
+#[expect(clippy::disallowed_types, reason = "String required for snapshot rendering")]
+fn render_formatted_screen(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        match b {
+            b'\n' => out.push('\n'),
+            _ => out.extend(std::ascii::escape_default(b).map(char::from)),
+        }
+    }
+    out
+}
+
 /// Append a fenced markdown block containing `body`. The opening and closing
 /// fences sit on their own lines, and trailing whitespace inside `body` is
 /// trimmed so the close fence isn't preceded by blank lines.
@@ -352,8 +381,14 @@ fn run_case(
             }
             cmd.env_clear();
             cmd.env("PATH", &e2e_env_path);
-            cmd.env("NO_COLOR", "1");
-            cmd.env("TERM", "dumb");
+            // Use `xterm-256color` and report color support so the runner does
+            // NOT wrap its output writers with [`anstream::StripStream`]. The
+            // strip layer would otherwise eat OSC8 milestone sequences that
+            // the test harness relies on to synchronise with the child. ANSI
+            // escapes emitted by the runner still get flattened to plain text
+            // by vt100's `Screen::contents()` when the snapshot is rendered,
+            // so this does not introduce colour-noise into existing snapshots.
+            cmd.env("TERM", "xterm-256color");
             // On Windows, ensure common executable extensions are included in PATHEXT for command resolution in subprocesses.
             if cfg!(windows) {
                 cmd.env("PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC");
@@ -367,6 +402,7 @@ fn run_case(
             let terminal = TestTerminal::spawn(SCREEN_SIZE, cmd).unwrap();
             let mut killer = terminal.child_handle.clone();
             let interactions = step.interactions().to_vec();
+            let formatted_snapshot = step.formatted_snapshot();
             let output = Arc::new(Mutex::new(String::new()));
             let output_for_thread = Arc::clone(&output);
             let (tx, rx) = mpsc::channel();
@@ -421,7 +457,11 @@ fn run_case(
                 }
 
                 let status = terminal.reader.wait_for_exit().unwrap();
-                let screen = terminal.reader.screen_contents();
+                let screen = if formatted_snapshot {
+                    render_formatted_screen(&terminal.reader.screen_contents_formatted())
+                } else {
+                    terminal.reader.screen_contents()
+                };
 
                 {
                     let mut output = output_for_thread.lock().unwrap();

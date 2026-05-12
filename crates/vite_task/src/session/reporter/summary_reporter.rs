@@ -11,8 +11,8 @@ use vite_str::Str;
 use vite_task_plan::{ExecutionItemDisplay, LeafExecutionKind};
 
 use super::{
-    ExitStatus, GraphExecutionReporter, GraphExecutionReporterBuilder, LeafExecutionReporter,
-    StdioConfig,
+    ColorSupport, ExitStatus, GraphExecutionReporter, GraphExecutionReporterBuilder,
+    LeafExecutionReporter, StdioConfig,
 };
 use crate::session::{
     event::{CacheStatus, CacheUpdateStatus, ExecutionError},
@@ -36,6 +36,10 @@ pub struct SummaryReporterBuilder {
 }
 
 impl SummaryReporterBuilder {
+    /// `writer` is the summary output stream. The wrapped inner builder
+    /// owns per-stream stripping of the child-process pipe writers; the
+    /// reporter's own summary text picks colour-vs-plain at format time
+    /// via `ColorizeExt`, so `writer` is stored unwrapped.
     pub fn new(
         inner: Box<dyn GraphExecutionReporterBuilder>,
         workspace_path: Arc<AbsolutePath>,
@@ -43,6 +47,7 @@ impl SummaryReporterBuilder {
         show_details: bool,
         write_summary: Option<WriteSummaryFn>,
         program_name: Str,
+        _color_support: ColorSupport,
     ) -> Self {
         Self { inner, workspace_path, writer, show_details, write_summary, program_name }
     }

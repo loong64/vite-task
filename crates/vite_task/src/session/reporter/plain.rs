@@ -6,9 +6,12 @@
 use std::io::Write;
 
 use super::{
-    LeafExecutionReporter, PipeWriters, StdioConfig, StdioSuggestion, format_cache_hit_message,
-    format_error_message,
+    ColorSupport, LeafExecutionReporter, PipeWriters, StdioConfig, StdioSuggestion,
+    format_cache_hit_message, format_error_message, maybe_strip_writer,
 };
+// `maybe_strip_writer` is used for the child-process pipe writers; reporter
+// output decides colour-vs-plain at format time via the `ColorizeExt` helpers
+// in [`super`].
 use crate::session::event::{CacheStatus, CacheUpdateStatus, ExecutionError};
 
 /// A self-contained [`LeafExecutionReporter`] for single-leaf executions
@@ -30,6 +33,11 @@ pub struct PlainReporter {
     silent_if_cache_hit: bool,
     /// Whether the current execution is a cache hit, set by `start()`.
     is_cache_hit: bool,
+    /// Per-stream colour support — stdout decides stripping of the reporter's
+    /// own writes and stdout-bound pipe output; stderr decides stripping of
+    /// the stderr pipe writer (kept independent so a TTY stderr doesn't get
+    /// stripped just because stdout is redirected).
+    color_support: ColorSupport,
 }
 
 impl PlainReporter {
@@ -37,8 +45,13 @@ impl PlainReporter {
     ///
     /// - `silent_if_cache_hit`: If true, suppress all output when the execution is a cache hit.
     /// - `writer`: Writer for reporter display output.
-    pub fn new(silent_if_cache_hit: bool, writer: Box<dyn Write>) -> Self {
-        Self { writer, silent_if_cache_hit, is_cache_hit: false }
+    /// - `color_support`: Per-stream colour-support decision.
+    pub fn new(
+        silent_if_cache_hit: bool,
+        writer: Box<dyn Write>,
+        color_support: ColorSupport,
+    ) -> Self {
+        Self { writer, silent_if_cache_hit, is_cache_hit: false, color_support }
     }
 
     /// Returns true if output should be suppressed for this execution.
@@ -71,8 +84,14 @@ impl LeafExecutionReporter for PlainReporter {
             StdioConfig {
                 suggestion: StdioSuggestion::Inherited,
                 writers: PipeWriters {
-                    stdout_writer: Box::new(std::io::stdout()),
-                    stderr_writer: Box::new(std::io::stderr()),
+                    stdout_writer: maybe_strip_writer(
+                        Box::new(std::io::stdout()),
+                        self.color_support.stdout,
+                    ),
+                    stderr_writer: maybe_strip_writer(
+                        Box::new(std::io::stderr()),
+                        self.color_support.stderr,
+                    ),
                 },
             }
         }
@@ -109,7 +128,8 @@ mod tests {
 
     #[test]
     fn plain_reporter_always_suggests_inherited() {
-        let mut reporter = PlainReporter::new(false, Box::new(std::io::sink()));
+        let mut reporter =
+            PlainReporter::new(false, Box::new(std::io::sink()), ColorSupport::uniform(false));
         let stdio_config =
             reporter.start(CacheStatus::Disabled(CacheDisabledReason::NoCacheMetadata));
         assert_eq!(stdio_config.suggestion, StdioSuggestion::Inherited);
@@ -117,7 +137,8 @@ mod tests {
 
     #[test]
     fn plain_reporter_suggests_inherited_even_when_silent() {
-        let mut reporter = PlainReporter::new(true, Box::new(std::io::sink()));
+        let mut reporter =
+            PlainReporter::new(true, Box::new(std::io::sink()), ColorSupport::uniform(false));
         let stdio_config =
             reporter.start(CacheStatus::Disabled(CacheDisabledReason::NoCacheMetadata));
         assert_eq!(stdio_config.suggestion, StdioSuggestion::Inherited);
