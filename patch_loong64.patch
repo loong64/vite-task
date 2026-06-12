@@ -1,0 +1,31 @@
+From b9e98835a5041d0b0887f9542c27dd5862b34366 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=90=B4=E5=B0=8F=E7=99=BD?= <296015668@qq.com>
+Date: Sat, 23 May 2026 10:34:06 +0800
+Subject: [PATCH] Add loongarch64 support
+
+---
+ crates/fspy_preload_unix/src/macros/linux.rs | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/crates/fspy_preload_unix/src/macros/linux.rs b/crates/fspy_preload_unix/src/macros/linux.rs
+index 34f748c68..7ff3cce23 100644
+--- a/crates/fspy_preload_unix/src/macros/linux.rs
++++ b/crates/fspy_preload_unix/src/macros/linux.rs
+@@ -15,6 +15,8 @@ macro_rules! intercept {
+             #[unsafe(export_name = ::core::concat!(::core::stringify!($name), 64))]
+             pub unsafe extern "C" fn interpose_fn() {
+                 #[cfg(target_arch = "aarch64")]
++        ::core::arch::naked_asm!("b {}", sym $name);
++                #[cfg(target_arch = "loongarch64")]
+         ::core::arch::naked_asm!("b {}", sym $name);
+                 #[cfg(target_arch = "x86_64")]
+         ::core::arch::naked_asm!("jmp {}", sym $name);
+@@ -58,6 +60,8 @@ macro_rules! intercept_inner {
+             pub unsafe extern "C" fn interpose_fn() {
+                 #[cfg(target_arch = "aarch64")]
+                 ::core::arch::naked_asm!("b {}", sym $name);
++                #[cfg(target_arch = "loongarch64")]
++                ::core::arch::naked_asm!("b {}", sym $name);
+                 #[cfg(target_arch = "x86_64")]
+                 ::core::arch::naked_asm!("jmp {}", sym $name);
+             }

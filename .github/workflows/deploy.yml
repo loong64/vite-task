@@ -1,0 +1,67 @@
+# Update all mentions of this name in vercel-packages when changing.
+name: build-and-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'vite-plus tag'
+        required: false
+        default: ''
+
+jobs:
+  check:
+    runs-on: ubuntu-slim
+    steps:
+      - name: Check Version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          else
+            version=$(curl -s https://api.github.com/repos/voidzero-dev/vite-plus/releases/latest | jq -r ".tag_name")
+          fi
+          echo "Current Version: ${version}"
+          if [ -z "${version}" ] || [ "${version}" == "null" ]; then
+            echo "Failed to get version"
+            exit 1
+          fi
+
+          VITE_PLUS_VERSION=${version}
+          VITE_TASK_COMMIT=$(curl -sSL https://github.com/voidzero-dev/vite-plus/raw/refs/tags/${VITE_PLUS_VERSION}/Cargo.toml | grep "github.com/voidzero-dev/vite-task" | awk -F'rev = "' '{print $2}' | cut -d'"' -f1 | uniq)
+
+          echo "Extracted vite-plus: ${VITE_PLUS_VERSION}"
+          echo "Extracted vite-task: ${VITE_TASK_COMMIT}"
+
+          if [[ ! "${VITE_TASK_COMMIT}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            exit 1
+          fi
+
+          echo "VITE_PLUS_VERSION=${VITE_PLUS_VERSION}" >> $GITHUB_ENV 
+          echo "VITE_TASK_COMMIT=${VITE_TASK_COMMIT}" >> $GITHUB_ENV
+
+      - name: Check Update
+        run: |
+          git clone --depth=1 -b loong64-${VITE_TASK_COMMIT:0:7} https://github.com/${{ github.repository }} /tmp/vite-task || echo "build=1" >> $GITHUB_ENV
+
+      - name: Checkout Repository
+        if: ${{ env.build }} == '1'
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Set Repository
+        if: ${{ env.build }} == '1'
+        run: |
+          git config --global user.name "${GITHUB_ACTOR}"
+          git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          git remote add upstream https://github.com/voidzero-dev/vite-task
+
+      - name: Push Repository
+        if: ${{ env.build }} == '1'
+        run: |
+          git fetch upstream --prune --force
+          git checkout ${VITE_TASK_COMMIT} -b loong64-${VITE_TASK_COMMIT:0:7}
+          wget -qO - https://github.com/${{ github.repository }}/raw/refs/heads/main/patch_loong64.patch | patch -p1
+
+          git commit -am "Add loongarch64 support"
+          git push origin loong64-${VITE_TASK_COMMIT:0:7} --force
