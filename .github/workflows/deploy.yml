@@ -8,6 +8,8 @@ on:
         description: 'vite-plus tag'
         required: false
         default: ''
+  schedule:
+    - cron: '0 10 * * *'
 
 jobs:
   check:
