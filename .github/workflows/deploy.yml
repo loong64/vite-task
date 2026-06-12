@@ -1,5 +1,5 @@
 # Update all mentions of this name in vercel-packages when changing.
-name: build-and-deploy
+name: deploy
 
 on:
   workflow_dispatch:
@@ -36,28 +36,31 @@ jobs:
             exit 1
           fi
 
-          echo "VITE_PLUS_VERSION=${VITE_PLUS_VERSION}" >> $GITHUB_ENV 
+          echo "VITE_PLUS_VERSION=${VITE_PLUS_VERSION}" >> $GITHUB_ENV
           echo "VITE_TASK_COMMIT=${VITE_TASK_COMMIT}" >> $GITHUB_ENV
 
       - name: Check Update
+        id: check_update
         run: |
-          git clone --depth=1 -b loong64-${VITE_TASK_COMMIT:0:7} https://github.com/${{ github.repository }} /tmp/vite-task || echo "build=1" >> $GITHUB_ENV
+          update=no
+          wget -qO /tmp/LICENSE https://github.com/loong64/vite-task/raw/refs/heads/loong64-${VITE_TASK_COMMIT:0:7}/LICENSE || echo "update=yes"
+          echo "update=${update}" >> $GITHUB_OUTPUT
 
       - name: Checkout Repository
-        if: ${{ env.build }} == '1'
+        if: ${{ steps.check_update.outputs.update == 'yes' }}
         uses: actions/checkout@v6
         with:
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Set Repository
-        if: ${{ env.build }} == '1'
+        if: ${{ steps.check_update.outputs.update == 'yes' }}
         run: |
           git config --global user.name "${GITHUB_ACTOR}"
           git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
           git remote add upstream https://github.com/voidzero-dev/vite-task
 
       - name: Push Repository
-        if: ${{ env.build }} == '1'
+        if: ${{ steps.check_update.outputs.update == 'yes' }}
         run: |
           git fetch upstream --prune --force
           git checkout ${VITE_TASK_COMMIT} -b loong64-${VITE_TASK_COMMIT:0:7}
