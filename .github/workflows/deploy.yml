@@ -44,9 +44,8 @@ jobs:
       - name: Check Update
         id: check_update
         run: |
-          update=no
-          wget -qO /tmp/LICENSE https://github.com/loong64/vite-task/raw/refs/heads/loong64-${VITE_TASK_COMMIT:0:7}/LICENSE || echo "update=yes"
-          echo "update=${update}" >> $GITHUB_OUTPUT
+          wget -qO /tmp/LICENSE https://github.com/loong64/vite-task/raw/refs/heads/loong64-${VITE_TASK_COMMIT:0:7}/LICENSE || update=yes
+          echo "update=${update:-no}" >> $GITHUB_OUTPUT
 
       - name: Checkout Repository
         if: ${{ steps.check_update.outputs.update == 'yes' }}
