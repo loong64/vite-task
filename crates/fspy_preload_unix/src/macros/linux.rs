@@ -16,6 +16,8 @@ macro_rules! intercept {
             pub unsafe extern "C" fn interpose_fn() {
                 #[cfg(target_arch = "aarch64")]
         ::core::arch::naked_asm!("b {}", sym $name);
+                #[cfg(target_arch = "loongarch64")]
+        ::core::arch::naked_asm!("b {}", sym $name);
                 #[cfg(target_arch = "x86_64")]
         ::core::arch::naked_asm!("jmp {}", sym $name);
             }
@@ -60,6 +62,8 @@ macro_rules! intercept_inner {
             #[unsafe(export_name = ::core::stringify!($name))]
             pub unsafe extern "C" fn interpose_fn() {
                 #[cfg(target_arch = "aarch64")]
+                ::core::arch::naked_asm!("b {}", sym $name);
+                #[cfg(target_arch = "loongarch64")]
                 ::core::arch::naked_asm!("b {}", sym $name);
                 #[cfg(target_arch = "x86_64")]
                 ::core::arch::naked_asm!("jmp {}", sym $name);
