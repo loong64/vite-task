@@ -5,6 +5,8 @@ use bstr::{BStr, ByteSlice as _};
 use rustix::fs::{Mode, OFlags};
 
 use super::Entry;
+#[cfg(target_arch = "loongarch64")]
+use crate::AsRawFd as _;
 use crate::{CStr, CWD, Errno, Fat, Result};
 
 #[derive(Clone, Copy)]
@@ -170,6 +172,7 @@ pub unsafe fn current() -> Result<Current> {
     unsafe { Current::from_bounds(bounds) }
 }
 
+#[cfg(not(target_arch = "loongarch64"))]
 fn read_bounds() -> Result<Bounds> {
     const STAT_PATH: &CoreCStr = c"/proc/self/stat";
     const STAT_CAPACITY: usize = 4096;
@@ -193,6 +196,76 @@ fn read_bounds() -> Result<Bounds> {
     }
 
     parse_bounds(&stat[..initialized])
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn read_bounds() -> Result<Bounds> {
+    const STAT_PATH: &CoreCStr = c"/proc/self/stat";
+    const STAT_CAPACITY: usize = 4096;
+
+    // SAFETY: `STAT_PATH` is NUL-terminated, and the remaining arguments are
+    // scalar Linux ABI values. `openat` returns the descriptor directly.
+    let fd = unsafe {
+        syscalls::syscall4(
+            syscalls::Sysno::openat,
+            (CWD.as_raw_fd() as isize).cast_unsigned(),
+            STAT_PATH.as_ptr().addr(),
+            (OFlags::RDONLY | OFlags::CLOEXEC).bits() as usize,
+            Mode::empty().bits() as usize,
+        )
+    }
+    .map_err(|errno| Errno::from_raw_os_error(errno.into_raw()))?;
+    let mut stat = [0; STAT_CAPACITY];
+    let mut initialized = 0;
+
+    loop {
+        let Some(remaining) = stat.get_mut(initialized..) else {
+            close(fd);
+            return Err(Errno::OVERFLOW);
+        };
+        if remaining.is_empty() {
+            close(fd);
+            return Err(Errno::OVERFLOW);
+        }
+
+        // SAFETY: `fd` remains open and `remaining` is writable for its full
+        // length. The kernel returns the initialized byte count.
+        let read = unsafe {
+            syscalls::syscall3(
+                syscalls::Sysno::read,
+                fd,
+                remaining.as_mut_ptr().addr(),
+                remaining.len(),
+            )
+        };
+        let read = match read {
+            Ok(read) => read,
+            Err(errno) => {
+                close(fd);
+                return Err(Errno::from_raw_os_error(errno.into_raw()));
+            }
+        };
+        let Some(read) = NonZeroUsize::new(read) else {
+            break;
+        };
+        let Some(next_initialized) = initialized.checked_add(read.get()) else {
+            close(fd);
+            return Err(Errno::OVERFLOW);
+        };
+        initialized = next_initialized;
+    }
+
+    close(fd);
+
+    parse_bounds(&stat[..initialized])
+}
+
+#[cfg(target_arch = "loongarch64")]
+#[inline]
+fn close(fd: usize) {
+    // SAFETY: callers pass a descriptor returned by `openat` that has no
+    // further users. Close errors do not affect the completed operation.
+    let _ = unsafe { syscalls::syscall1(syscalls::Sysno::close, fd) };
 }
 
 fn parse_bounds(stat: &[u8]) -> Result<Bounds> {

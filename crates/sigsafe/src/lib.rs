@@ -41,7 +41,7 @@ pub use rustix::{
 // rustix upgrade may break this line. If that happens, re-point it at any
 // other `rustix::runtime` item — do not delete it: it is the only enforcement
 // of the raw-rustix rule above.
-#[cfg(all(target_os = "linux", not(miri)))]
+#[cfg(all(target_os = "linux", not(target_arch = "loongarch64"), not(miri)))]
 const _: () = {
     let _ = rustix::runtime::exit_group;
 };

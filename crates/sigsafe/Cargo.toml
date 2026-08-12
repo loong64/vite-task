@@ -28,8 +28,12 @@ rustix = { workspace = true, features = ["param"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 # Parsing remains allocation-free and no-std; `atoi` enables `std` by default.
 atoi = { version = "3.1.0", default-features = false }
-rustix = { workspace = true, features = ["runtime"] }
 syscalls = { workspace = true }
+
+# Keep the raw-Rustix backend assertion on Linux architectures it supports.
+# LoongArch64 uses this crate's direct `syscalls` implementation instead.
+[target.'cfg(all(target_os = "linux", not(target_arch = "loongarch64")))'.dependencies]
+rustix = { workspace = true, features = ["runtime"] }
 
 # Cross-validates the page-size probe against rustix's auxv-based answer.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
