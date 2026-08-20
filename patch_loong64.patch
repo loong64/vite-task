@@ -1,17 +1,97 @@
-From b9e98835a5041d0b0887f9542c27dd5862b34366 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?=E5=90=B4=E5=B0=8F=E7=99=BD?= <296015668@qq.com>
-Date: Sat, 23 May 2026 10:34:06 +0800
+From 5fe01c110280d2bdad2b049a8423a3e04f4e356d Mon Sep 17 00:00:00 2001
+From: wojiushixiaobai <wojiushixiaobai@users.noreply.github.com>
+Date: Wed, 12 Aug 2026 10:53:45 +0000
 Subject: [PATCH] Add loongarch64 support
 
 ---
- crates/fspy_preload_unix/src/macros/linux.rs | 4 ++++
- 1 file changed, 4 insertions(+)
+ .cargo/config.toml                           |  3 +
+ .cargo/zigcc-loongarch64-unknown-linux-musl  |  7 ++
+ crates/fspy/Cargo.toml                       |  3 +
+ crates/fspy/src/unix/syscall_handler/mod.rs  |  1 +
+ crates/fspy/src/unix/syscall_handler/stat.rs |  9 +++
+ crates/fspy_preload_unix/src/macros/linux.rs |  4 ++
+ crates/sigsafe/Cargo.toml                    |  6 +-
+ crates/sigsafe/src/env/linux.rs              | 73 +++++++++++++++++++
+ crates/sigsafe/src/lib.rs                    |  2 +-
+ crates/sigsafe/src/mm.rs                     | 75 ++++++++++++++++++++
+ 10 files changed, 181 insertions(+), 2 deletions(-)
+ create mode 100644 .cargo/zigcc-loongarch64-unknown-linux-musl
 
+diff --git a/.cargo/config.toml b/.cargo/config.toml
+index e9ac52c28..1eb293a51 100644
+--- a/.cargo/config.toml
++++ b/.cargo/config.toml
+@@ -11,3 +11,6 @@ rustflags = ["-C", "linker=.cargo/zigcc-x86_64-unknown-linux-musl"]
+ 
+ [target.aarch64-unknown-linux-musl]
+ rustflags = ["-C", "linker=.cargo/zigcc-aarch64-unknown-linux-musl"]
++
++[target.loongarch64-unknown-linux-musl]
++rustflags = ["-C", "linker=.cargo/zigcc-loongarch64-unknown-linux-musl"]
+diff --git a/.cargo/zigcc-loongarch64-unknown-linux-musl b/.cargo/zigcc-loongarch64-unknown-linux-musl
+new file mode 100644
+index 000000000..df53ead89
+--- /dev/null
++++ b/.cargo/zigcc-loongarch64-unknown-linux-musl
+@@ -0,0 +1,7 @@
++#!/bin/sh
++# Linker wrapper for loongarch64-unknown-linux-musl targets.
++# Always use Zig: a Linux host's system cc normally targets glibc, not musl.
++if command -v cargo-zigbuild >/dev/null 2>&1; then
++  exec cargo-zigbuild zig cc -- -fno-sanitize=all -target loongarch64-linux-musl "$@"
++fi
++exec zig cc -fno-sanitize=all -target loongarch64-linux-musl "$@"
+diff --git a/crates/fspy/Cargo.toml b/crates/fspy/Cargo.toml
+index 59ce55cc9..60119468e 100644
+--- a/crates/fspy/Cargo.toml
++++ b/crates/fspy/Cargo.toml
+@@ -66,6 +66,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-s
+ [target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dev-dependencies]
+ fspy_test_bin = { path = "../fspy_test_bin", artifact = "bin", target = "aarch64-unknown-linux-musl" }
+ 
++[target.'cfg(all(target_os = "linux", target_arch = "loongarch64"))'.dev-dependencies]
++fspy_test_bin = { path = "../fspy_test_bin", artifact = "bin", target = "loongarch64-unknown-linux-musl" }
++
+ [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
+ fspy_test_bin = { path = "../fspy_test_bin", artifact = "bin", target = "x86_64-unknown-linux-musl" }
+ 
+diff --git a/crates/fspy/src/unix/syscall_handler/mod.rs b/crates/fspy/src/unix/syscall_handler/mod.rs
+index 4b6f7947e..45c95a5e6 100644
+--- a/crates/fspy/src/unix/syscall_handler/mod.rs
++++ b/crates/fspy/src/unix/syscall_handler/mod.rs
+@@ -92,6 +92,7 @@ impl_handler!(
+     #[cfg(target_arch = "x86_64")] lstat,
+     #[cfg(target_arch = "x86_64")] newfstatat,
+     #[cfg(target_arch = "aarch64")] fstatat,
++    #[cfg(target_arch = "loongarch64")] fstatat,
+     statx,
+ 
+     #[cfg(target_arch = "x86_64")] access,
+diff --git a/crates/fspy/src/unix/syscall_handler/stat.rs b/crates/fspy/src/unix/syscall_handler/stat.rs
+index 40d9f76f1..6e39aa5d2 100644
+--- a/crates/fspy/src/unix/syscall_handler/stat.rs
++++ b/crates/fspy/src/unix/syscall_handler/stat.rs
+@@ -24,6 +24,15 @@ impl SyscallHandler {
+         self.handle_open(caller, dir_fd, path_ptr, libc::O_RDONLY)
+     }
+ 
++    #[cfg(target_arch = "loongarch64")]
++    pub(super) fn fstatat(
++        &mut self,
++        caller: Caller,
++        (dir_fd, path_ptr): (Fd, CStrPtr),
++    ) -> io::Result<()> {
++        self.handle_open(caller, dir_fd, path_ptr, libc::O_RDONLY)
++    }
++
+     #[cfg(target_arch = "x86_64")]
+     pub(super) fn newfstatat(
+         &mut self,
 diff --git a/crates/fspy_preload_unix/src/macros/linux.rs b/crates/fspy_preload_unix/src/macros/linux.rs
-index 34f748c68..7ff3cce23 100644
+index 20cca08c8..144ac330e 100644
 --- a/crates/fspy_preload_unix/src/macros/linux.rs
 +++ b/crates/fspy_preload_unix/src/macros/linux.rs
-@@ -15,6 +15,8 @@ macro_rules! intercept {
+@@ -23,6 +23,8 @@ macro_rules! intercept {
              #[unsafe(export_name = ::core::concat!(::core::stringify!($name), 64))]
              pub unsafe extern "C" fn interpose_fn() {
                  #[cfg(target_arch = "aarch64")]
@@ -20,7 +100,7 @@ index 34f748c68..7ff3cce23 100644
          ::core::arch::naked_asm!("b {}", sym $name);
                  #[cfg(target_arch = "x86_64")]
          ::core::arch::naked_asm!("jmp {}", sym $name);
-@@ -58,6 +60,8 @@ macro_rules! intercept_inner {
+@@ -77,6 +79,8 @@ macro_rules! intercept_inner {
              pub unsafe extern "C" fn interpose_fn() {
                  #[cfg(target_arch = "aarch64")]
                  ::core::arch::naked_asm!("b {}", sym $name);
@@ -29,3 +109,217 @@ index 34f748c68..7ff3cce23 100644
                  #[cfg(target_arch = "x86_64")]
                  ::core::arch::naked_asm!("jmp {}", sym $name);
              }
+diff --git a/crates/sigsafe/Cargo.toml b/crates/sigsafe/Cargo.toml
+index fea461676..13af76b15 100644
+--- a/crates/sigsafe/Cargo.toml
++++ b/crates/sigsafe/Cargo.toml
+@@ -28,9 +28,13 @@ rustix = { workspace = true, features = ["param"] }
+ [target.'cfg(target_os = "linux")'.dependencies]
+ # Parsing remains allocation-free and no-std; `atoi` enables `std` by default.
+ atoi = { version = "3.1.0", default-features = false }
+-rustix = { workspace = true, features = ["runtime"] }
+ syscalls = { workspace = true }
+ 
++# Keep the raw-Rustix backend assertion on Linux architectures it supports.
++# LoongArch64 uses this crate's direct `syscalls` implementation instead.
++[target.'cfg(all(target_os = "linux", not(target_arch = "loongarch64")))'.dependencies]
++rustix = { workspace = true, features = ["runtime"] }
++
+ # Cross-validates the page-size probe against rustix's auxv-based answer.
+ [target.'cfg(target_os = "linux")'.dev-dependencies]
+ rustix = { workspace = true, features = ["param"] }
+diff --git a/crates/sigsafe/src/env/linux.rs b/crates/sigsafe/src/env/linux.rs
+index 47fad46cc..3cbba2d52 100644
+--- a/crates/sigsafe/src/env/linux.rs
++++ b/crates/sigsafe/src/env/linux.rs
+@@ -5,6 +5,8 @@ use bstr::{BStr, ByteSlice as _};
+ use rustix::fs::{Mode, OFlags};
+ 
+ use super::Entry;
++#[cfg(target_arch = "loongarch64")]
++use crate::AsRawFd as _;
+ use crate::{CStr, CWD, Errno, Fat, Result};
+ 
+ #[derive(Clone, Copy)]
+@@ -170,6 +172,7 @@ pub unsafe fn current() -> Result<Current> {
+     unsafe { Current::from_bounds(bounds) }
+ }
+ 
++#[cfg(not(target_arch = "loongarch64"))]
+ fn read_bounds() -> Result<Bounds> {
+     const STAT_PATH: &CoreCStr = c"/proc/self/stat";
+     const STAT_CAPACITY: usize = 4096;
+@@ -195,6 +198,76 @@ fn read_bounds() -> Result<Bounds> {
+     parse_bounds(&stat[..initialized])
+ }
+ 
++#[cfg(target_arch = "loongarch64")]
++fn read_bounds() -> Result<Bounds> {
++    const STAT_PATH: &CoreCStr = c"/proc/self/stat";
++    const STAT_CAPACITY: usize = 4096;
++
++    // SAFETY: `STAT_PATH` is NUL-terminated, and the remaining arguments are
++    // scalar Linux ABI values. `openat` returns the descriptor directly.
++    let fd = unsafe {
++        syscalls::syscall4(
++            syscalls::Sysno::openat,
++            (CWD.as_raw_fd() as isize).cast_unsigned(),
++            STAT_PATH.as_ptr().addr(),
++            (OFlags::RDONLY | OFlags::CLOEXEC).bits() as usize,
++            Mode::empty().bits() as usize,
++        )
++    }
++    .map_err(|errno| Errno::from_raw_os_error(errno.into_raw()))?;
++    let mut stat = [0; STAT_CAPACITY];
++    let mut initialized = 0;
++
++    loop {
++        let Some(remaining) = stat.get_mut(initialized..) else {
++            close(fd);
++            return Err(Errno::OVERFLOW);
++        };
++        if remaining.is_empty() {
++            close(fd);
++            return Err(Errno::OVERFLOW);
++        }
++
++        // SAFETY: `fd` remains open and `remaining` is writable for its full
++        // length. The kernel returns the initialized byte count.
++        let read = unsafe {
++            syscalls::syscall3(
++                syscalls::Sysno::read,
++                fd,
++                remaining.as_mut_ptr().addr(),
++                remaining.len(),
++            )
++        };
++        let read = match read {
++            Ok(read) => read,
++            Err(errno) => {
++                close(fd);
++                return Err(Errno::from_raw_os_error(errno.into_raw()));
++            }
++        };
++        let Some(read) = NonZeroUsize::new(read) else {
++            break;
++        };
++        let Some(next_initialized) = initialized.checked_add(read.get()) else {
++            close(fd);
++            return Err(Errno::OVERFLOW);
++        };
++        initialized = next_initialized;
++    }
++
++    close(fd);
++
++    parse_bounds(&stat[..initialized])
++}
++
++#[cfg(target_arch = "loongarch64")]
++#[inline]
++fn close(fd: usize) {
++    // SAFETY: callers pass a descriptor returned by `openat` that has no
++    // further users. Close errors do not affect the completed operation.
++    let _ = unsafe { syscalls::syscall1(syscalls::Sysno::close, fd) };
++}
++
+ fn parse_bounds(stat: &[u8]) -> Result<Bounds> {
+     // `comm` (field 2) may itself contain spaces, newlines, and `)`. The
+     // kernel-added delimiter is the last `)` because every later field is
+diff --git a/crates/sigsafe/src/lib.rs b/crates/sigsafe/src/lib.rs
+index b46d2f6c9..a254b2a55 100644
+--- a/crates/sigsafe/src/lib.rs
++++ b/crates/sigsafe/src/lib.rs
+@@ -41,7 +41,7 @@ pub use rustix::{
+ // rustix upgrade may break this line. If that happens, re-point it at any
+ // other `rustix::runtime` item — do not delete it: it is the only enforcement
+ // of the raw-rustix rule above.
+-#[cfg(all(target_os = "linux", not(miri)))]
++#[cfg(all(target_os = "linux", not(target_arch = "loongarch64"), not(miri)))]
+ const _: () = {
+     let _ = rustix::runtime::exit_group;
+ };
+diff --git a/crates/sigsafe/src/mm.rs b/crates/sigsafe/src/mm.rs
+index c7cdecd05..1853655b0 100644
+--- a/crates/sigsafe/src/mm.rs
++++ b/crates/sigsafe/src/mm.rs
+@@ -8,4 +8,79 @@
+ //! pre-libc startup) and the crate-level backend check, which guarantees
+ //! they cannot silently turn into libc calls on Linux.
+ 
++#[cfg(not(all(target_os = "linux", target_arch = "loongarch64")))]
+ pub use rustix::mm::{MapFlags, MprotectFlags, ProtFlags, mmap_anonymous, mprotect, munmap};
++
++#[cfg(all(target_os = "linux", target_arch = "loongarch64"))]
++mod linux {
++    use core::ffi::c_void;
++
++    pub use rustix::mm::{MapFlags, MprotectFlags, ProtFlags};
++
++    use crate::{Errno, Result};
++
++    /// `MAP_ANONYMOUS`, defined by the Linux UAPI on every architecture supported
++    /// by this crate.
++    const MAP_ANONYMOUS: u32 = 0x20;
++
++    /// Maps anonymous memory using Linux's `mmap` syscall.
++    ///
++    /// # Safety
++    ///
++    /// The same safety requirements as [`rustix::mm::mmap_anonymous`] apply.
++    #[inline]
++    pub unsafe fn mmap_anonymous(
++        addr: *mut c_void,
++        length: usize,
++        prot: ProtFlags,
++        flags: MapFlags,
++    ) -> Result<*mut c_void> {
++        // SAFETY: upheld by this function's caller. `-1` is the Linux `MAP_FAILED`
++        // file-descriptor argument for an anonymous mapping.
++        let mapped = unsafe {
++            syscalls::syscall6(
++                syscalls::Sysno::mmap,
++                addr.addr(),
++                length,
++                prot.bits() as usize,
++                flags.bits() as usize | MAP_ANONYMOUS as usize,
++                usize::MAX,
++                0,
++            )
++        }
++        .map_err(|errno| Errno::from_raw_os_error(errno.into_raw()))?;
++
++        Ok(mapped as *mut c_void)
++    }
++
++    /// Changes protection on an existing mapping using Linux's `mprotect` syscall.
++    ///
++    /// # Safety
++    ///
++    /// The same safety requirements as [`rustix::mm::mprotect`] apply.
++    #[inline]
++    pub unsafe fn mprotect(ptr: *mut c_void, length: usize, flags: MprotectFlags) -> Result<()> {
++        // SAFETY: upheld by this function's caller.
++        unsafe {
++            syscalls::syscall3(syscalls::Sysno::mprotect, ptr.addr(), length, flags.bits() as usize)
++        }
++        .map_err(|errno| Errno::from_raw_os_error(errno.into_raw()))?;
++        Ok(())
++    }
++
++    /// Unmaps memory using Linux's `munmap` syscall.
++    ///
++    /// # Safety
++    ///
++    /// The same safety requirements as [`rustix::mm::munmap`] apply.
++    #[inline]
++    pub unsafe fn munmap(addr: *mut c_void, length: usize) -> Result<()> {
++        // SAFETY: upheld by this function's caller.
++        unsafe { syscalls::syscall2(syscalls::Sysno::munmap, addr.addr(), length) }
++            .map_err(|errno| Errno::from_raw_os_error(errno.into_raw()))?;
++        Ok(())
++    }
++}
++
++#[cfg(all(target_os = "linux", target_arch = "loongarch64"))]
++pub use linux::{MapFlags, MprotectFlags, ProtFlags, mmap_anonymous, mprotect, munmap};
