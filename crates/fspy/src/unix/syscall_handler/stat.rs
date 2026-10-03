@@ -24,6 +24,15 @@ impl SyscallHandler {
         self.handle_open(caller, dir_fd, path_ptr, libc::O_RDONLY)
     }
 
+    #[cfg(target_arch = "loongarch64")]
+    pub(super) fn fstatat(
+        &mut self,
+        caller: Caller,
+        (dir_fd, path_ptr): (Fd, CStrPtr),
+    ) -> io::Result<()> {
+        self.handle_open(caller, dir_fd, path_ptr, libc::O_RDONLY)
+    }
+
     #[cfg(target_arch = "x86_64")]
     pub(super) fn newfstatat(
         &mut self,
